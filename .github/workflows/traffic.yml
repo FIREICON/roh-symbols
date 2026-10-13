@@ -81,7 +81,7 @@ jobs:
               with urllib.request.urlopen(req) as r:
                   return json.load(r)
           today = datetime.date.today().isoformat()
-          hits = zget("https://zenodo.org/api/records/20633170/versions?allversions=true&size=50")["hits"]["hits"]
+          hits = zget("https://zenodo.org/api/records/20633170/versions?allversions=true&size=20")["hits"]["hits"]
           hits.sort(key=lambda h: h["metadata"].get("publication_date", ""))
           def upsert(fn, cols, newrows, key):
               rows = []
