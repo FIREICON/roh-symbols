@@ -1,0 +1,80 @@
+name: Icon traffic stats
+
+on:
+  schedule:
+    - cron: "17 6 * * *"   # cada dia, 06:17 UTC
+  workflow_dispatch:        # permet executar-lo a mà des de la pestanya Actions
+
+permissions:
+  contents: write
+
+jobs:
+  traffic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare stats branch
+        run: |
+          if git ls-remote --exit-code --heads origin stats >/dev/null 2>&1; then
+            git fetch origin stats
+            git checkout -B stats origin/stats
+          else
+            git checkout --orphan stats
+            git rm -rf --quiet .
+          fi
+
+      - name: Collect traffic
+        env:
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import csv, json, os, urllib.request, datetime
+          repo = os.environ["REPO"]; tok = os.environ["GH_TOKEN"]
+          def get(path):
+              req = urllib.request.Request(f"https://api.github.com/repos/{repo}/traffic/{path}",
+                  headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+              with urllib.request.urlopen(req) as r:
+                  return json.load(r)
+          def merge(fn, items, key, cols):
+              rows = {}
+              if os.path.exists(fn):
+                  with open(fn, newline="") as f:
+                      for r in csv.DictReader(f): rows[r["date"]] = r
+              for it in items:
+                  d = it["timestamp"][:10]
+                  rows[d] = {"date": d, cols[0]: it["count"], cols[1]: it["uniques"]}
+              with open(fn, "w", newline="") as f:
+                  w = csv.DictWriter(f, fieldnames=["date"] + cols); w.writeheader()
+                  for d in sorted(rows): w.writerow(rows[d])
+          def append(fn, today, items, namecols):
+              exists = os.path.exists(fn)
+              keep = []
+              if exists:
+                  with open(fn, newline="") as f:
+                      keep = [r for r in csv.DictReader(f) if r["date"] != today]
+              with open(fn, "w", newline="") as f:
+                  w = csv.DictWriter(f, fieldnames=["date"] + namecols + ["count", "uniques"]); w.writeheader()
+                  for r in keep: w.writerow(r)
+                  for it in items:
+                      row = {"date": today, "count": it["count"], "uniques": it["uniques"]}
+                      for c in namecols: row[c] = it.get(c, "")
+                      w.writerow(row)
+          today = datetime.date.today().isoformat()
+          merge("views.csv", get("views?per=day")["views"], "date", ["views", "unique_visitors"])
+          merge("clones.csv", get("clones?per=day")["clones"], "date", ["clones", "unique_cloners"])
+          append("popular_paths.csv", today, get("popular/paths"), ["path", "title"])
+          append("referrers.csv", today, get("popular/referrers"), ["referrer"])
+          print("ok", today)
+          PY
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add views.csv clones.csv popular_paths.csv referrers.csv
+          git diff --cached --quiet || git commit -m "Traffic stats $(date -u +%F)"
+          git push origin stats
