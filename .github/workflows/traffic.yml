@@ -26,7 +26,7 @@ jobs:
             git rm -rf --quiet .
           fi
 
-      - name: Collect traffic
+      - name: Collect GitHub traffic
         env:
           GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
           REPO: ${{ github.repository }}
@@ -71,10 +71,47 @@ jobs:
           print("ok", today)
           PY
 
+      - name: Collect Zenodo stats
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import csv, json, os, urllib.request, datetime
+          def zget(url):
+              req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "roh-symbols-stats"})
+              with urllib.request.urlopen(req) as r:
+                  return json.load(r)
+          today = datetime.date.today().isoformat()
+          hits = zget("https://zenodo.org/api/records/20633170/versions?allversions=true&size=50")["hits"]["hits"]
+          hits.sort(key=lambda h: h["metadata"].get("publication_date", ""))
+          def upsert(fn, cols, newrows, key):
+              rows = []
+              if os.path.exists(fn):
+                  with open(fn, newline="") as f:
+                      rows = [r for r in csv.DictReader(f) if r["date"] != today]
+              rows += newrows
+              rows.sort(key=key)
+              with open(fn, "w", newline="") as f:
+                  w = csv.DictWriter(f, fieldnames=cols); w.writeheader()
+                  for r in rows: w.writerow(r)
+          vrows = []
+          for i, h in enumerate(hits, 1):
+              s = h.get("stats", {}); m = h["metadata"]
+              vrows.append({"date": today, "record_id": h["id"], "version": m.get("version") or f"v{i}",
+                            "publication_date": m.get("publication_date", ""),
+                            "views": s.get("version_views", 0), "unique_views": s.get("version_unique_views", 0),
+                            "downloads": s.get("version_downloads", 0), "unique_downloads": s.get("version_unique_downloads", 0)})
+          upsert("zenodo.csv", ["date", "record_id", "version", "publication_date", "views", "unique_views", "downloads", "unique_downloads"],
+                 vrows, lambda r: (r["date"], r["publication_date"]))
+          tot = {k: max(h.get("stats", {}).get(k, 0) for h in hits) for k in ["views", "unique_views", "downloads", "unique_downloads"]}
+          upsert("zenodo_total.csv", ["date", "views", "unique_views", "downloads", "unique_downloads"],
+                 [dict(date=today, **tot)], lambda r: r["date"])
+          print("zenodo ok", today, len(hits))
+          PY
+
       - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add views.csv clones.csv popular_paths.csv referrers.csv
+          git add *.csv
           git diff --cached --quiet || git commit -m "Traffic stats $(date -u +%F)"
           git push origin stats
